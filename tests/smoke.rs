@@ -1,7 +1,7 @@
 extern crate curl;
 extern crate env_logger;
 extern crate futures;
-extern crate tokio_core;
+extern crate tokio;
 extern crate tokio_curl;
 
 use std::sync::{Arc, Mutex};

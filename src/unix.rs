@@ -5,7 +5,7 @@ extern crate slab;
 use std::cell::RefCell;
 use std::io;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use curl::{self, Error};
 use curl::easy::Easy;
@@ -16,7 +16,9 @@ use futures::task::{self, AtomicTask};
 use futures::sync::mpsc::{unbounded, UnboundedSender, UnboundedReceiver};
 use futures::sync::oneshot;
 use futures::stream::{Stream, Fuse};
-use tokio_core::reactor::{Timeout, Handle, PollEvented};
+use tokio_executor::Executor;
+use tokio_timer::Delay;
+use tokio_reactor::PollEvented;
 use self::mio::unix::EventedFd;
 use self::slab::Slab;
 
@@ -24,8 +26,7 @@ use stack::Stack;
 
 #[derive(Clone)]
 pub struct Session {
-    // TODO: in next major version remove this `RefCell`.
-    tx: RefCell<UnboundedSender<Message>>,
+    tx: UnboundedSender<Message>,
 }
 
 enum Message {
@@ -35,10 +36,11 @@ enum Message {
 struct Data {
     multi: Multi,
     state: RefCell<State>,
-    handle: Handle,
     rx: Fuse<UnboundedReceiver<Message>>,
     notify: Arc<MyNotify>,
 }
+
+unsafe impl Send for Data {}
 
 struct State {
     // Active HTTP requests, storing each `EasyHandle` as well as the `Complete`
@@ -66,7 +68,7 @@ struct SocketEntry {
 }
 
 enum TimeoutState {
-    Waiting(Timeout),
+    Waiting(Delay),
     Ready,
     None,
 }
@@ -78,7 +80,7 @@ pub struct Perform {
 }
 
 impl Session {
-    pub fn new(handle: Handle) -> Session {
+    pub fn new(executor: &mut Executor) -> Session {
         let mut m = Multi::new();
 
         let (tx, rx) = unbounded();
@@ -97,10 +99,9 @@ impl Session {
             DATA.with(|d| d.schedule_socket(socket, events, token))
         }).unwrap();
 
-        handle.clone().spawn(Data {
+        let worker = Data {
             rx: rx.fuse(),
             multi: m,
-            handle: handle,
             notify: Arc::new(MyNotify {
                 stack: Stack::new(),
                 task: AtomicTask::new(),
@@ -109,18 +110,18 @@ impl Session {
                 handles: Slab::with_capacity(128),
                 sockets: Slab::with_capacity(128),
                 timeout: TimeoutState::None,
-            }),
-        }.map_err(|e| {
-            panic!("error while processing http requests: {}", e)
-        }));
+            })
+        };
 
-        Session { tx: RefCell::new(tx) }
+        executor.spawn(Box::new(worker.map_err(|_| ())))
+                .expect("tokio::spawn failed (is a tokio runtime running this future?)");
+
+        Session { tx }
     }
 
     pub fn perform(&self, handle: Easy) -> Perform {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .borrow_mut()
             .unbounded_send(Message::Execute(handle, tx))
             .expect("driver task has gone away");
         Perform { inner: rx }
@@ -208,7 +209,7 @@ impl Data {
             if dur == Duration::new(0, 0) {
                 state.timeout = TimeoutState::Ready;
             } else {
-                let mut timeout = Timeout::new(dur, &self.handle).unwrap();
+                let mut timeout = Delay::new(Instant::now() + dur);
                 drop(state);
                 let res = timeout.poll().unwrap();
                 state = self.state.borrow_mut();
@@ -264,7 +265,7 @@ impl Data {
         // the event loop.
         let index = if token == 0 {
             let source = MioSocket { inner: socket };
-            let stream = PollEvented::new(source, &self.handle).unwrap();
+            let stream = PollEvented::new(source);
             if !(state.sockets.capacity() > state.handles.len()) {
                 let len = state.sockets.len();
                 state.sockets.reserve_exact(len);
@@ -379,12 +380,12 @@ impl Data {
             return
         }
 
-        if state.sockets[idx].stream.poll_read().is_ready() {
+        if state.sockets[idx].stream.poll_read_ready(mio::Ready::readable()).unwrap().is_ready() {
             debug!("\treadable");
             events.input(true);
             set = true;
         }
-        if state.sockets[idx].stream.poll_write().is_ready() {
+        if state.sockets[idx].stream.poll_write_ready().unwrap().is_ready() {
             debug!("\twritable");
             events.output(true);
             set = true;
@@ -514,14 +515,14 @@ impl SocketEntry {
         // starving anything unnecessarily.
         if want.input() {
             if (fd.revents & libc::POLLIN) == 0 {
-                self.stream.need_read();
+                self.stream.clear_read_ready(mio::Ready::readable()).unwrap();
             } else {
                 task::current().notify();
             }
         }
         if want.output() {
             if (fd.revents & libc::POLLOUT) == 0 {
-                self.stream.need_write();
+                self.stream.clear_write_ready().unwrap();
             } else {
                 // TODO: don't need to `unpark` here a second time if we
                 // already did so above.

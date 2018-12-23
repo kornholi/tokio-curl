@@ -60,7 +60,9 @@
 #[macro_use]
 extern crate log;
 extern crate futures;
-extern crate tokio_core;
+extern crate tokio_executor;
+extern crate tokio_reactor;
+extern crate tokio_timer;
 extern crate curl;
 
 #[macro_use]
@@ -82,7 +84,7 @@ use std::io;
 
 use futures::{Future, Poll, Async};
 use curl::easy::Easy;
-use tokio_core::reactor::Handle;
+use tokio_executor::Executor;
 
 /// A shared cache for HTTP requests to pool data such as TCP connections
 /// between.
@@ -127,8 +129,8 @@ impl Session {
     ///
     /// This function returns a future which will resolve to a `Session` once
     /// it's been initialized.
-    pub fn new(handle: Handle) -> Session {
-        Session { inner: imp::Session::new(handle) }
+    pub fn new(executor: &mut Executor) -> Session {
+        Session { inner: imp::Session::new(executor) }
     }
 
     /// Execute and HTTP request asynchronously, returning a future representing

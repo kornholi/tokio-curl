@@ -51,7 +51,7 @@ pub struct Perform {
 }
 
 impl Session {
-    pub fn new(_handle: Handle) -> Session {
+    pub fn new() -> Session {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let conn1 = TcpStream::connect(&addr).unwrap();

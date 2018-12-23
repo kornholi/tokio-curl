@@ -6,19 +6,18 @@
 extern crate curl;
 extern crate env_logger;
 extern crate futures;
-extern crate tokio_core;
+extern crate tokio;
 extern crate tokio_curl;
 
 use curl::easy::Easy;
 use futures::Future;
-use tokio_core::reactor::Core;
 use tokio_curl::Session;
 
 fn main() {
     env_logger::init().unwrap();
 
-    let mut lp = Core::new().unwrap();
-    let session = Session::new(lp.handle());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let session = Session::new(&mut rt.executor());
 
     // Once we've got our session available to us, execute our two requests.
     // Each request will be a GET request and for now we just ignore the actual
@@ -37,7 +36,13 @@ fn main() {
 
     // Run both requests, waiting for them to finish. Once done we print out
     // their response codes and errors.
-    let (mut a, mut b) = lp.run(requests).unwrap();
-    println!("{:?}", a.response_code());
-    println!("{:?}", b.response_code());
+    tokio::run(requests
+        .map(|(mut a, mut b)| {
+            println!("{:?}", a.response_code());
+            println!("{:?}", b.response_code());
+        })
+        .map_err(|e| {
+            println!("FAILED: {:?}", e);
+        })
+    );
 }
